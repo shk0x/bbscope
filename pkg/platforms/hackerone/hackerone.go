@@ -76,6 +76,14 @@ func getProgramScope(authorization string, id string, bbpOnly bool, categories [
 
 				if eligibleForSubmission {
 					if !bbpOnly || (bbpOnly && eligibleForBounty) {
+						//fmt.Print(gjson.Get(res.BodyString, "data."+strconv.Itoa(i)+".id").Str,)
+						//fmt.Print("\n")
+						//fmt.Print(gjson.Get(res.BodyString, "data."+strconv.Itoa(i)+".attributes.asset_type").Str,)
+						//fmt.Print("\n")
+						fmt.Print(gjson.Get(res.BodyString, "data."+strconv.Itoa(i)+".attributes.instruction").Str,)
+						fmt.Print("\n")
+
+
 						pData.InScope = append(pData.InScope, scope.ScopeElement{
 							Target:      gjson.Get(res.BodyString, "data."+strconv.Itoa(i)+".attributes.asset_identifier").Str,
 							Description: strings.ReplaceAll(gjson.Get(res.BodyString, "data."+strconv.Itoa(i)+".attributes.instruction").Str, "\n", "  "),
