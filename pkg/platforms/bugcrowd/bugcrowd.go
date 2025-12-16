@@ -1,5 +1,6 @@
 package bugcrowd
-
+// no usar -p y -b al mismo tiempo. y cuando sea -p se le pasa las cookies asi:
+// bbscope bc -t "{token_bc};_bugcrowd_session={token_bc2};" -p -o t
 import (
 	"crypto/tls"
 	"encoding/json"
@@ -831,6 +832,81 @@ func Login(email, password, otpFetchCommand, proxy string) (string, error) {
 	return "", errors.New("unable to obtain session cookie after completing login flow")
 }
 
+func GetInvitesProgramHandles(sessionToken string) ([]string, error) {
+	pageIndex := 1
+	var totalCount int
+	paths := []string{}
+	fetchedPrograms := make(map[string]bool)
+	allHandlersFoundCounter := 0
+
+	listEndpointURL := "https://bugcrowd.com/engagements/invites.json?status=accepted&page="
+
+	for {
+		var res *whttp.WHTTPRes
+		var err error
+
+		res, err = rateLimitedSendHTTPRequest(
+			&whttp.WHTTPReq{
+				Method: "GET",
+				URL:    listEndpointURL + strconv.Itoa(pageIndex),
+				Headers: []whttp.WHTTPHeader{
+					{Name: "Cookie", Value: buildSessionCookieHeader(sessionToken)},
+					{Name: "User-Agent", Value: USER_AGENT},
+				},
+			}, nil)
+
+		if err != nil {
+			return nil, err
+		}
+
+		if res.StatusCode == 403 || res.StatusCode == 406 {
+			return nil, errors.New("you are temporarily WAF banned, change IP or wait a few hours")
+		}
+
+		// Assuming res.BodyString is the JSON string response
+		result := gjson.Get(string(res.BodyString), "invites")
+		if totalCount == 0 {
+			totalCount = int(gjson.Get(string(res.BodyString), "paginationMeta.totalCount").Int())
+		}
+
+		// If the engagements array is empty, it means there are no more programs to fetch on subsequent pages.
+		if len(result.Array()) == 0 {
+			break
+		}
+
+		// Iterating over each element in the programs array
+		result.ForEach(func(key, value gjson.Result) bool {
+			programURL := value.Get("engagementBriefDetails.briefUrl").String()
+			fmt.Println("briefUrl: ")
+			fmt.Println(programURL)
+
+			// Maintain a counter of unique program URLs found
+			if !fetchedPrograms[programURL] {
+				allHandlersFoundCounter++
+				fetchedPrograms[programURL] = true
+
+				
+				paths = append(paths, programURL)
+			}
+
+			// Return true to continue iterating
+			return true
+		})
+
+		// Print the number of programs fetched so far
+		// utils.Log.Info("Fetched programs: ", len(paths), " | Total unique programs found: ", allHandlersFoundCounter)
+
+		pageIndex++
+
+		// Check if we have fetched all programs using allHandlersFoundCounter
+		if allHandlersFoundCounter >= totalCount {
+			break
+		}
+	}
+
+	return paths, nil
+}
+
 func GetProgramHandles(sessionToken string, engagementType string, pvtOnly bool) ([]string, error) {
 	pageIndex := 1
 	var totalCount int
@@ -905,7 +981,28 @@ func GetProgramHandles(sessionToken string, engagementType string, pvtOnly bool)
 
 	return paths, nil
 }
+func GetInviteProgramScope(handle string, categories string, token string) (pData scope.ProgramData, err error){
 
+	pData.Url = "https://bugcrowd.com/" + strings.TrimPrefix(handle, "/")
+
+	getBriefVersionDocument, err := getEngagementBriefVersionDocument(handle, token)
+	if err != nil {
+		return pData, err
+	}
+
+	//fmt.Println("getBriefVersionDocument:")
+	//fmt.Println("getBriefVersionDocument:")
+
+	if getBriefVersionDocument != "" {
+		err = extractScopeFromEngagement(getBriefVersionDocument, token, &pData)
+		if err != nil {
+			return pData, err
+		}
+	}
+
+
+	return pData, nil
+}
 func GetProgramScope(handle string, categories string, token string) (pData scope.ProgramData, err error) {
 	isEngagement := strings.HasPrefix(handle, "/engagements/")
 
@@ -981,14 +1078,7 @@ func getEngagementBriefVersionDocument(handle string, token string) (string, err
 }
 
 func extractScopeFromEngagement(getBriefVersionDocument string, token string, pData *scope.ProgramData) (err error) {
-	if getBriefVersionDocument == ".json" {
-		utils.Log.Warn("Compliance required! Empty Extraction URL (Skipping)...")
-		pData.InScope = append(pData.InScope, scope.ScopeElement{
-			Target:      "2FA_REQUIRED",
-			Description: "Two-Factor Authentication is required to access this program.",
-		})
-		return nil
-	}
+
 	res, err := rateLimitedSendHTTPRequest(
 		&whttp.WHTTPReq{
 			Method: "GET",
@@ -1167,14 +1257,24 @@ func GetCategories(input string) ([]string, error) {
 }
 
 func GetAllProgramsScope(token string, bbpOnly bool, pvtOnly bool, categories string, outputFlags string, concurrency int, delimiterCharacter string, includeOOS, printRealTime bool, knownHandles []string) (programs []scope.ProgramData, err error) {
-	programHandles, err := GetProgramHandles(token, "bug_bounty", pvtOnly)
 
-	if err != nil {
-		return nil, err
+	programHandles := []string{}
+
+
+
+	if pvtOnly {
+		//fmt.Print("QUIERES PRIVADOS?")
+
+		inviteProgramHandles, err := GetInvitesProgramHandles(token)
+		if err != nil {
+			return nil, err
+		}
+		programHandles = inviteProgramHandles
 	}
+	
+	if bbpOnly && !pvtOnly {
 
-	if !bbpOnly {
-		vdpHandles, err := GetProgramHandles(token, "vdp", pvtOnly)
+		vdpHandles, err := GetProgramHandles(token, "bug_bounty", pvtOnly)
 		if err != nil {
 			return nil, err
 		}
@@ -1207,27 +1307,64 @@ func GetAllProgramsScope(token string, bbpOnly bool, pvtOnly bool, categories st
 		go func() {
 			defer processGroup.Done()
 			for handle := range handles {
-				pScope, err := GetProgramScope(handle, categories, token)
 
-				if err != nil {
-					select {
-					case errChan <- fmt.Errorf("error processing handle %s: %v", handle, err):
-					default:
+
+
+				if pvtOnly {
+					pScope, err := GetInviteProgramScope(handle, categories, token)
+
+					if err != nil {
+						select {
+						case errChan <- fmt.Errorf("error processing handle %s: %v", handle, err):
+						default:
+						}
+						return
 					}
-					return
+
+					if len(pScope.InScope) == 0 {
+						continue
+					}
+
+					mutex.Lock()
+					programs = append(programs, pScope)
+					mutex.Unlock()
+
+					if printRealTime {
+						scope.PrintProgramScope(pScope, outputFlags, delimiterCharacter, includeOOS)
+					}
+				} else {
+					pScope, err := GetProgramScope(handle, categories, token)
+
+					if err != nil {
+						select {
+						case errChan <- fmt.Errorf("error processing handle %s: %v", handle, err):
+						default:
+						}
+						return
+					}
+
+					if len(pScope.InScope) == 0 {
+						continue
+					}
+
+
+					mutex.Lock()
+					programs = append(programs, pScope)
+					mutex.Unlock()
+
+					if printRealTime {
+						scope.PrintProgramScope(pScope, outputFlags, delimiterCharacter, includeOOS)
+					}
+
+
+
 				}
 
-				if len(pScope.InScope) == 0 {
-					continue
-				}
 
-				mutex.Lock()
-				programs = append(programs, pScope)
-				mutex.Unlock()
 
-				if printRealTime {
-					scope.PrintProgramScope(pScope, outputFlags, delimiterCharacter, includeOOS)
-				}
+
+
+
 			}
 		}()
 	}
